@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>School Register — Attendance</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" />
+<style>
+  html, body, #root { min-height: 100%; }
+  body { margin: 0; }
+  input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.6; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+// =====================================================================
+// FIREBASE SETUP — do this once, then every device that opens this file
+// will read and write the SAME shared data.
+//
+// 1. Go to https://console.firebase.google.com and create a free project
+//    (no credit card needed for this usage level).
+// 2. In the left sidebar: Build → Firestore Database → "Create database".
+//    Choose any region close to your school, and start in "test mode".
+// 3. Click the gear icon (top left) → "Project settings". Scroll to
+//    "Your apps", click the </> (web) icon, and register an app
+//    (no need for Firebase Hosting).
+// 4. Firebase will show you a `firebaseConfig` object. Copy it and paste
+//    it below, replacing the placeholder values.
+// 5. Save this file. Open it (or host it) — the app will now sync live
+//    across every device that opens it.
+//
+// Note on security: "test mode" Firestore rules allow anyone with your
+// config to read and write this data, which is fine for a small internal
+// school tool but worth tightening later (Firestore → Rules) if you want
+// to restrict access, e.g. to signed-in users only.
+// =====================================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyC_8g9aRHkbAF-ozBgMnav-YgOEWQx_1zA",
+  authDomain: "sta-attendance-ac512.firebaseapp.com",
+  projectId: "sta-attendance-ac512",
+  storageBucket: "sta-attendance-ac512.firebasestorage.app",
+  messagingSenderId: "209488173580",
+  appId: "1:209488173580:web:07c7eeddea2eaac0d52c29",
+};
+
+const CONFIG_READY = firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY_HERE";
+let db = null;
+if (CONFIG_READY) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+}
+const COLLECTION = "attendance-app";
+
+async function storageGet(key) {
+  if (!db) return null;
+  try {
+    const snap = await db.collection(COLLECTION).doc(key).get();
+    return snap.exists ? JSON.parse(snap.data().value) : null;
+  } catch (e) {
+    console.error("storageGet failed", key, e);
+    return null;
+  }
+}
+async function storageSet(key, value) {
+  if (!db) return false;
+  try {
+    await db.collection(COLLECTION).doc(key).set({ value: JSON.stringify(value) });
+    return true;
+  } catch (e) {
+    console.error("storageSet failed", key, e);
+    return false;
+  }
+}
+
+// ---------- Design tokens ----------
+const INK = "#20291F";
+const PAPER = "#EFF1E9";
+const CARD = "#FBFAF6";
+const LINE = "#D7D9C9";
+const FOREST = "#33502F";
+const FOREST_DARK = "#233A21";
+const BRICK = "#9C4130";
+const BRASS = "#A87C2B";
+const MUTED = "#6B6F5F";
+
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+};
+
+const prettyDate = (iso) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+};
+
+const makeId = (prefix) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+const defaultStructure = () => ({
+  targetTotal: 2485,
+  grades: [1, 2, 3].map((g) => ({
+    id: `grade-${g}`,
+    name: `Grade ${g}`,
+    classes: [1, 2, 3, 4, 5].map((c) => ({
+      id: `grade-${g}-class-${c}`,
+      name: `Class ${c}`,
+      teacher: "",
+    })),
+  })),
+});
+
+// ---------- Small UI atoms ----------
+function Toast({ text, onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 2600);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  return (
+    <div
+      className="fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-3 rounded shadow-lg text-sm z-50"
+      style={{ background: INK, color: PAPER }}
+    >
+      {text}
+    </div>
+  );
+}
+
+function Button({ children, onClick, variant = "primary", disabled, className = "", type = "button" }) {
+  const styles = {
+    primary: { background: FOREST, color: "#fff" },
+    dark: { background: INK, color: PAPER },
+    outline: { background: "transparent", color: INK, border: `1px solid ${LINE}` },
+    danger: { background: BRICK, color: "#fff" },
+    ghost: { background: "transparent", color: MUTED },
+  };
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={`px-4 py-2 rounded text-sm font-medium transition-opacity disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 ${className}`}
+      style={styles[variant]}
+    >
+      {children}
+    </button>
+  );
+}
+
+function TextField({ label, value, onChange, placeholder, type = "text" }) {
+  return (
+    <label className="flex flex-col gap-1 text-sm">
+      {label && <span style={{ color: MUTED }}>{label}</span>}
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="px-3 py-2 rounded outline-none text-sm"
+        style={{ background: "#fff", border: `1px solid ${LINE}`, color: INK }}
+      />
+    </label>
+  );
+}
+
+// ---------- Setup screen (shown until firebaseConfig is filled in) ----------
+function SetupNeeded() {
+  return (
+    <div className="min-h-full w-full flex items-center justify-center" style={{ background: PAPER, fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      <div className="max-w-lg mx-auto px-6 py-12">
+        <div className="text-xs mb-2" style={{ color: BRASS }}>
+          One-time setup
+        </div>
+        <div className="text-2xl mb-4" style={{ fontFamily: "Georgia, serif", color: INK }}>
+          Connect this app to a shared database
+        </div>
+        <p className="text-sm mb-4" style={{ color: MUTED }}>
+          To let every teacher and admin see the same students and attendance from any
+          device, this file needs to be connected to a free Firebase project.
+        </p>
+        <ol className="text-sm flex flex-col gap-2 mb-4" style={{ color: INK }}>
+          <li>1. Go to <span style={{ color: FOREST }}>console.firebase.google.com</span> and create a free project.</li>
+          <li>2. Build → Firestore Database → Create database → start in test mode.</li>
+          <li>3. Project settings (gear icon) → Your apps → register a web app (&lt;/&gt;).</li>
+          <li>4. Copy the <code>firebaseConfig</code> object Firebase shows you.</li>
+          <li>5. Open this file in a text editor, paste it in near the top where it says <code>firebaseConfig</code>, and save.</li>
+        </ol>
+        <p className="text-xs" style={{ color: MUTED }}>
+          Full instructions are also written as comments at the top of this file's source code.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Header ----------
+function Header({ onHome, subtitle }) {
+  return (
+    <div className="flex items-center justify-between mb-8">
+      <button onClick={onHome} className="text-left">
+        <div className="text-xs tracking-wide" style={{ color: BRASS }}>
+          School Register
+        </div>
+        <div className="text-2xl" style={{ fontFamily: "Georgia, 'Times New Roman', serif", color: INK }}>
+          Attendance
+        </div>
+      </button>
+      {subtitle && (
+        <div className="text-sm text-right" style={{ color: MUTED }}>
+          {subtitle}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- HOME ----------
+function Home({ onPick }) {
+  return (
+    <div>
+      <div className="mb-10">
+        <div className="text-3xl mb-2" style={{ fontFamily: "Georgia, serif", color: INK }}>
+          Good day.
+        </div>
+        <p className="text-sm max-w-md" style={{ color: MUTED }}>
+          Choose how you'd like to use the register today.
+        </p>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-5">
+        <button
+          onClick={() => onPick("teacher")}
+          className="text-left p-6 rounded-md hover:-translate-y-0.5 transition-transform"
+          style={{ background: CARD, border: `1px solid ${LINE}` }}
+        >
+          <div className="text-xs mb-3" style={{ color: BRASS }}>
+            I.
+          </div>
+          <div className="text-xl mb-2" style={{ fontFamily: "Georgia, serif", color: INK }}>
+            Take attendance
+          </div>
+          <p className="text-sm" style={{ color: MUTED }}>
+            For teachers. Mark who is present in your class today.
+          </p>
+        </button>
+        <button
+          onClick={() => onPick("admin")}
+          className="text-left p-6 rounded-md hover:-translate-y-0.5 transition-transform"
+          style={{ background: CARD, border: `1px solid ${LINE}` }}
+        >
+          <div className="text-xs mb-3" style={{ color: BRASS }}>
+            II.
+          </div>
+          <div className="text-xl mb-2" style={{ fontFamily: "Georgia, serif", color: INK }}>
+            Manage the school
+          </div>
+          <p className="text-sm" style={{ color: MUTED }}>
+            For admins. Edit grades, classes, students, and view reports.
+          </p>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- TEACHER FLOW ----------
+function TeacherName({ recent, onSubmit }) {
+  const [name, setName] = useState("");
+  return (
+    <div className="max-w-sm">
+      <div className="text-sm mb-1" style={{ color: BRASS }}>
+        Step 1 of 3
+      </div>
+      <div className="text-xl mb-4" style={{ fontFamily: "Georgia, serif", color: INK }}>
+        Who's taking attendance?
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim()) onSubmit(name.trim());
+        }}
+        className="flex flex-col gap-3"
+      >
+        <TextField label="Your name" value={name} onChange={setName} placeholder="e.g. Ms. Farida Hassan" />
+        <Button type="submit" disabled={!name.trim()}>
+          Continue
+        </Button>
+      </form>
+      {recent.length > 0 && (
+        <div className="mt-6">
+          <div className="text-xs mb-2" style={{ color: MUTED }}>
+            Recently used names
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {recent.map((n) => (
+              <button
+                key={n}
+                onClick={() => onSubmit(n)}
+                className="px-3 py-1.5 rounded text-sm"
+                style={{ background: CARD, border: `1px solid ${LINE}`, color: INK }}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TeacherClassPick({ structure, onPick }) {
+  return (
+    <div>
+      <div className="text-sm mb-1" style={{ color: BRASS }}>
+        Step 2 of 3
+      </div>
+      <div className="text-xl mb-6" style={{ fontFamily: "Georgia, serif", color: INK }}>
+        Select your class
+      </div>
+      <div className="grid sm:grid-cols-3 gap-6">
+        {structure.grades.map((grade) => (
+          <div key={grade.id}>
+            <div className="text-sm font-medium mb-3 pb-2" style={{ color: INK, borderBottom: `1px solid ${LINE}` }}>
+              {grade.name}
+            </div>
+            <div className="flex flex-col gap-2">
+              {grade.classes.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => onPick(grade, c)}
+                  className="text-left px-3 py-2.5 rounded text-sm hover:opacity-80"
+                  style={{ background: CARD, border: `1px solid ${LINE}`, color: INK }}
+                >
+                  <div>{c.name}</div>
+                  {c.teacher && (
+                    <div className="text-xs mt-0.5" style={{ color: MUTED }}>
+                      {c.teacher}
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TeacherRoster({ grade, klass, students, teacherName, date, setDate, onBack, onSaved }) {
+  const [presentIds, setPresentIds] = useState(new Set());
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  const classStudents = useMemo(
+    () =>
+      students
+        .filter((s) => s.classId === klass.id)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [students, klass.id]
+  );
+
+  const attendanceKey = `attendance:${klass.id}:${date}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    storageGet(attendanceKey).then((rec) => {
+      if (cancelled) return;
+      setPresentIds(new Set(rec?.presentIds || []));
+      setSavedAt(rec?.submittedAt || null);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [attendanceKey]);
+
+  const toggle = (id) => {
+    setPresentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allPresent = classStudents.length > 0 && classStudents.every((s) => presentIds.has(s.id));
+
+  const markAll = () => {
+    if (allPresent) {
+      setPresentIds(new Set());
+    } else {
+      setPresentIds(new Set(classStudents.map((s) => s.id)));
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await storageSet(attendanceKey, {
+      presentIds: Array.from(presentIds),
+      teacher: teacherName,
+      submittedAt: new Date().toISOString(),
+    });
+    setSaving(false);
+    if (ok) {
+      setSavedAt(new Date().toISOString());
+      onSaved();
+    }
+  };
+
+  const presentCount = presentIds.size;
+  const absentCount = classStudents.length - presentCount;
+
+  return (
+    <div>
+      <button onClick={onBack} className="text-sm mb-4" style={{ color: MUTED }}>
+        ← Change class
+      </button>
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-1">
+        <div>
+          <div className="text-sm mb-1" style={{ color: BRASS }}>
+            Step 3 of 3
+          </div>
+          <div className="text-xl" style={{ fontFamily: "Georgia, serif", color: INK }}>
+            {grade.name} · {klass.name}
+          </div>
+        </div>
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="px-3 py-1.5 rounded text-sm"
+          style={{ background: "#fff", border: `1px solid ${LINE}`, color: INK }}
+        />
+      </div>
+      <div className="text-sm mb-5" style={{ color: MUTED }}>
+        {prettyDate(date)} — {teacherName}
+      </div>
+
+      {savedAt && (
+        <div className="text-xs mb-4 px-3 py-2 rounded inline-block" style={{ background: "#E8EEE4", color: FOREST_DARK }}>
+          Saved for this date. You can still make changes below.
+        </div>
+      )}
+
+      {loading ? (
+        <div className="text-sm py-10" style={{ color: MUTED }}>
+          Loading roster…
+        </div>
+      ) : classStudents.length === 0 ? (
+        <div className="text-sm py-10" style={{ color: MUTED }}>
+          No students have been added to this class yet. Ask an admin to add students under "Manage the school".
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between mb-3">
+            <Button variant="outline" onClick={markAll}>
+              {allPresent ? "Clear all" : "Mark all present"}
+            </Button>
+            <div className="text-sm" style={{ color: MUTED }}>
+              <span style={{ color: FOREST }}>{presentCount} present</span>
+              {"  ·  "}
+              <span style={{ color: BRICK }}>{absentCount} absent</span>
+              {"  ·  "}
+              {classStudents.length} total
+            </div>
+          </div>
+
+          <div className="rounded-md overflow-hidden" style={{ border: `1px solid ${LINE}` }}>
+            {classStudents.map((s, i) => {
+              const present = presentIds.has(s.id);
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => toggle(s.id)}
+                  className="w-full flex items-center gap-4 px-4 py-3 text-left"
+                  style={{
+                    background: present ? "#EDF3EA" : CARD,
+                    borderBottom: i === classStudents.length - 1 ? "none" : `1px solid ${LINE}`,
+                  }}
+                >
+                  <span className="text-xs w-7 text-right" style={{ color: MUTED }}>
+                    {i + 1}
+                  </span>
+                  <span
+                    className="w-5 h-5 rounded-full flex items-center justify-center text-xs shrink-0"
+                    style={{
+                      border: `1.5px solid ${present ? FOREST : LINE}`,
+                      background: present ? FOREST : "transparent",
+                      color: "#fff",
+                    }}
+                  >
+                    {present ? "✓" : ""}
+                  </span>
+                  <span className="text-sm" style={{ color: INK }}>
+                    {s.name}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-5 flex justify-end">
+            <Button onClick={save} disabled={saving}>
+              {saving ? "Saving…" : "Save attendance"}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------- ADMIN: Classes ----------
+function AdminClasses({ structure, saveStructure }) {
+  const [local, setLocal] = useState(structure);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setLocal(structure);
+    setDirty(false);
+  }, [structure]);
+
+  const update = (fn) => {
+    setLocal((prev) => {
+      const next = JSON.parse(JSON.stringify(prev));
+      fn(next);
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const renameGrade = (gid, name) =>
+    update((s) => {
+      s.grades.find((g) => g.id === gid).name = name;
+    });
+
+  const renameClass = (gid, cid, name) =>
+    update((s) => {
+      const g = s.grades.find((g) => g.id === gid);
+      g.classes.find((c) => c.id === cid).name = name;
+    });
+
+  const setTeacher = (gid, cid, teacher) =>
+    update((s) => {
+      const g = s.grades.find((g) => g.id === gid);
+      g.classes.find((c) => c.id === cid).teacher = teacher;
+    });
+
+  const addClass = (gid) =>
+    update((s) => {
+      const g = s.grades.find((g) => g.id === gid);
+      g.classes.push({ id: makeId("class"), name: `Class ${g.classes.length + 1}`, teacher: "" });
+    });
+
+  const removeClass = (gid, cid) => {
+    if (!confirm("Remove this class? Students in it will keep their class assignment but the class will no longer appear in lists.")) return;
+    update((s) => {
+      const g = s.grades.find((g) => g.id === gid);
+      g.classes = g.classes.filter((c) => c.id !== cid);
+    });
+  };
+
+  const setTarget = (val) =>
+    update((s) => {
+      s.targetTotal = Number(val) || 0;
+    });
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <div className="text-xl" style={{ fontFamily: "Georgia, serif", color: INK }}>
+          Grades &amp; classes
+        </div>
+        <Button
+          onClick={async () => {
+            await saveStructure(local);
+            setDirty(false);
+          }}
+          disabled={!dirty}
+        >
+          Save changes
+        </Button>
+      </div>
+
+      <div className="mb-6 max-w-xs">
+        <TextField
+          label="Target total students (for reference)"
+          type="number"
+          value={local.targetTotal}
+          onChange={setTarget}
+        />
+      </div>
+
+      <div className="grid lg:grid-cols-3 gap-6">
+        {local.grades.map((grade) => (
+          <div key={grade.id} className="p-4 rounded-md" style={{ background: CARD, border: `1px solid ${LINE}` }}>
+            <input
+              value={grade.name}
+              onChange={(e) => renameGrade(grade.id, e.target.value)}
+              className="text-sm font-medium mb-3 w-full px-2 py-1 rounded"
+              style={{ background: "transparent", border: `1px solid transparent`, color: INK }}
+              onFocus={(e) => (e.target.style.border = `1px solid ${LINE}`)}
+              onBlur={(e) => (e.target.style.border = "1px solid transparent")}
+            />
+            <div className="flex flex-col gap-3">
+              {grade.classes.map((c) => (
+                <div key={c.id} className="p-3 rounded" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      value={c.name}
+                      onChange={(e) => renameClass(grade.id, c.id, e.target.value)}
+                      className="text-sm flex-1 px-2 py-1 rounded"
+                      style={{ border: `1px solid ${LINE}`, color: INK }}
+                    />
+                    <button onClick={() => removeClass(grade.id, c.id)} className="text-xs" style={{ color: BRICK }}>
+                      Remove
+                    </button>
+                  </div>
+                  <input
+                    value={c.teacher}
+                    onChange={(e) => setTeacher(grade.id, c.id, e.target.value)}
+                    placeholder="Assigned teacher (optional)"
+                    className="text-xs w-full px-2 py-1 rounded"
+                    style={{ border: `1px solid ${LINE}`, color: MUTED }}
+                  />
+                </div>
+              ))}
+              <button onClick={() => addClass(grade.id)} className="text-xs text-left px-2 py-1.5" style={{ color: FOREST }}>
+                + Add class
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------- ADMIN: Students ----------
+function AdminStudents({ structure, students, saveStudents, notify }) {
+  const [gradeId, setGradeId] = useState(structure.grades[0]?.id || "");
+  const grade = structure.grades.find((g) => g.id === gradeId) || structure.grades[0];
+  const [classId, setClassId] = useState(grade?.classes[0]?.id || "");
+  const [search, setSearch] = useState("");
+  const [bulkText, setBulkText] = useState("");
+  const [csvText, setCsvText] = useState("");
+  const [editing, setEditing] = useState(null);
+
+  useEffect(() => {
+    const g = structure.grades.find((g) => g.id === gradeId) || structure.grades[0];
+    if (g && !g.classes.find((c) => c.id === classId)) {
+      setClassId(g.classes[0]?.id || "");
+    }
+  }, [gradeId, structure]);
+
+  const filtered = useMemo(() => {
+    return students
+      .filter((s) => (classId ? s.classId === classId : true))
+      .filter((s) => s.name.toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [students, classId, search]);
+
+  const addBulk = async () => {
+    const names = bulkText
+      .split("\n")
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (names.length === 0 || !classId) return;
+    const newOnes = names.map((name) => ({ id: makeId("stu"), name, gradeId, classId }));
+    const next = [...students, ...newOnes];
+    const ok = await saveStudents(next);
+    if (ok) {
+      setBulkText("");
+      notify(`Added ${newOnes.length} student${newOnes.length === 1 ? "" : "s"}.`);
+    }
+  };
+
+  const importCsv = async () => {
+    const lines = csvText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const added = [];
+    let skipped = 0;
+    for (const line of lines) {
+      const parts = line.split(",").map((p) => p.trim());
+      const [name, gradeName, className] = parts;
+      if (!name || !gradeName || !className) {
+        skipped++;
+        continue;
+      }
+      const g = structure.grades.find((g) => g.name.toLowerCase() === gradeName.toLowerCase());
+      const c = g?.classes.find((c) => c.name.toLowerCase() === className.toLowerCase());
+      if (!g || !c) {
+        skipped++;
+        continue;
+      }
+      added.push({ id: makeId("stu"), name, gradeId: g.id, classId: c.id });
+    }
+    if (added.length > 0) {
+      const ok = await saveStudents([...students, ...added]);
+      if (ok) setCsvText("");
+    }
+    notify(`Imported ${added.length} student${added.length === 1 ? "" : "s"}${skipped ? `, skipped ${skipped}` : ""}.`);
+  };
+
+  const removeStudent = async (id) => {
+    if (!confirm("Remove this student?")) return;
+    await saveStudents(students.filter((s) => s.id !== id));
+  };
+
+  const updateStudent = async (id, patch) => {
+    const next = students.map((s) => (s.id === id ? { ...s, ...patch } : s));
+    await saveStudents(next);
+    setEditing(null);
+  };
+
+  return (
+    <div>
+      <div className="text-xl mb-5" style={{ fontFamily: "Georgia, serif", color: INK }}>
+        Students
+      </div>
+      <div className="text-sm mb-6" style={{ color: MUTED }}>
+        {students.length} of {structure.targetTotal} target students added across the school.
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-8">
+        <div className="flex flex-col gap-6">
+          <div className="p-4 rounded-md" style={{ background: CARD, border: `1px solid ${LINE}` }}>
+            <div className="text-sm font-medium mb-3" style={{ color: INK }}>
+              Add names to one class
+            </div>
+            <div className="flex gap-2 mb-3">
+              <select
+                value={gradeId}
+                onChange={(e) => setGradeId(e.target.value)}
+                className="px-2 py-1.5 rounded text-sm flex-1"
+                style={{ border: `1px solid ${LINE}` }}
+              >
+                {structure.grades.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={classId}
+                onChange={(e) => setClassId(e.target.value)}
+                className="px-2 py-1.5 rounded text-sm flex-1"
+                style={{ border: `1px solid ${LINE}` }}
+              >
+                {grade?.classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <textarea
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={"One student name per line, e.g.\nAmira Saleh\nYousef Nabil"}
+              rows={6}
+              className="w-full px-3 py-2 rounded text-sm mb-3"
+              style={{ border: `1px solid ${LINE}` }}
+            />
+            <Button onClick={addBulk} disabled={!bulkText.trim() || !classId}>
+              Add to {grade?.name} · {grade?.classes.find((c) => c.id === classId)?.name}
+            </Button>
+          </div>
+
+          <div className="p-4 rounded-md" style={{ background: CARD, border: `1px solid ${LINE}` }}>
+            <div className="text-sm font-medium mb-1" style={{ color: INK }}>
+              Import a full list (CSV)
+            </div>
+            <div className="text-xs mb-3" style={{ color: MUTED }}>
+              One student per line: Name, Grade name, Class name — e.g. "Amira Saleh, Grade 1, Class 3"
+            </div>
+            <textarea
+              value={csvText}
+              onChange={(e) => setCsvText(e.target.value)}
+              rows={5}
+              className="w-full px-3 py-2 rounded text-sm mb-3"
+              style={{ border: `1px solid ${LINE}` }}
+            />
+            <Button variant="outline" onClick={importCsv} disabled={!csvText.trim()}>
+              Import list
+            </Button>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex gap-2 mb-3">
+            <select
+              value={classId}
+              onChange={(e) => setClassId(e.target.value)}
+              className="px-2 py-1.5 rounded text-sm"
+              style={{ border: `1px solid ${LINE}` }}
+            >
+              <option value="">All classes in {grade?.name}</option>
+              {grade?.classes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name…"
+              className="px-3 py-1.5 rounded text-sm flex-1"
+              style={{ border: `1px solid ${LINE}` }}
+            />
+          </div>
+          <div className="rounded-md overflow-hidden max-h-[520px] overflow-y-auto" style={{ border: `1px solid ${LINE}` }}>
+            {filtered.length === 0 ? (
+              <div className="text-sm p-6 text-center" style={{ color: MUTED }}>
+                No students found.
+              </div>
+            ) : (
+              filtered.map((s, i) => (
+                <div
+                  key={s.id}
+                  className="flex items-center gap-3 px-3 py-2 text-sm"
+                  style={{ background: i % 2 ? "#fff" : CARD, borderBottom: `1px solid ${LINE}` }}
+                >
+                  {editing === s.id ? (
+                    <EditStudentRow
+                      student={s}
+                      structure={structure}
+                      onCancel={() => setEditing(null)}
+                      onSave={(patch) => updateStudent(s.id, patch)}
+                    />
+                  ) : (
+                    <>
+                      <span className="flex-1" style={{ color: INK }}>
+                        {s.name}
+                      </span>
+                      <button onClick={() => setEditing(s.id)} className="text-xs" style={{ color: BRASS }}>
+                        Edit
+                      </button>
+                      <button onClick={() => removeStudent(s.id)} className="text-xs" style={{ color: BRICK }}>
+                        Remove
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditStudentRow({ student, structure, onCancel, onSave }) {
+  const [name, setName] = useState(student.name);
+  const [gradeId, setGradeId] = useState(student.gradeId);
+  const grade = structure.grades.find((g) => g.id === gradeId) || structure.grades[0];
+  const [classId, setClassId] = useState(student.classId);
+  return (
+    <div className="flex flex-wrap items-center gap-2 flex-1">
+      <input value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 rounded text-sm flex-1 min-w-[120px]" style={{ border: `1px solid ${LINE}` }} />
+      <select value={gradeId} onChange={(e) => setGradeId(e.target.value)} className="px-2 py-1 rounded text-sm" style={{ border: `1px solid ${LINE}` }}>
+        {structure.grades.map((g) => (
+          <option key={g.id} value={g.id}>
+            {g.name}
+          </option>
+        ))}
+      </select>
+      <select value={classId} onChange={(e) => setClassId(e.target.value)} className="px-2 py-1 rounded text-sm" style={{ border: `1px solid ${LINE}` }}>
+        {grade?.classes.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <button onClick={() => onSave({ name, gradeId, classId })} className="text-xs" style={{ color: FOREST }}>
+        Save
+      </button>
+      <button onClick={onCancel} className="text-xs" style={{ color: MUTED }}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+// ---------- ADMIN: Reports ----------
+function AdminReports({ structure, students }) {
+  const [gradeId, setGradeId] = useState(structure.grades[0]?.id || "");
+  const grade = structure.grades.find((g) => g.id === gradeId) || structure.grades[0];
+  const [classId, setClassId] = useState(grade?.classes[0]?.id || "");
+  const [date, setDate] = useState(todayStr());
+  const [record, setRecord] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const g = structure.grades.find((g) => g.id === gradeId) || structure.grades[0];
+    if (g && !g.classes.find((c) => c.id === classId)) setClassId(g.classes[0]?.id || "");
+  }, [gradeId, structure]);
+
+  useEffect(() => {
+    if (!classId) return;
+    setLoading(true);
+    storageGet(`attendance:${classId}:${date}`).then((rec) => {
+      setRecord(rec);
+      setLoading(false);
+    });
+  }, [classId, date]);
+
+  const classStudents = students.filter((s) => s.classId === classId);
+  const presentSet = new Set(record?.presentIds || []);
+
+  return (
+    <div>
+      <div className="text-xl mb-5" style={{ fontFamily: "Georgia, serif", color: INK }}>
+        Reports
+      </div>
+      <div className="flex flex-wrap gap-2 mb-5">
+        <select value={gradeId} onChange={(e) => setGradeId(e.target.value)} className="px-2 py-1.5 rounded text-sm" style={{ border: `1px solid ${LINE}` }}>
+          {structure.grades.map((g) => (
+            <option key={g.id} value={g.id}>
+              {g.name}
+            </option>
+          ))}
+        </select>
+        <select value={classId} onChange={(e) => setClassId(e.target.value)} className="px-2 py-1.5 rounded text-sm" style={{ border: `1px solid ${LINE}` }}>
+          {grade?.classes.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="px-2 py-1.5 rounded text-sm" style={{ border: `1px solid ${LINE}` }} />
+      </div>
+
+      {loading ? (
+        <div className="text-sm" style={{ color: MUTED }}>
+          Loading…
+        </div>
+      ) : !record ? (
+        <div className="text-sm" style={{ color: MUTED }}>
+          No attendance was recorded for {grade?.name} · {grade?.classes.find((c) => c.id === classId)?.name} on {prettyDate(date)}.
+        </div>
+      ) : (
+        <div>
+          <div className="text-sm mb-4" style={{ color: MUTED }}>
+            Taken by {record.teacher || "—"} · {classStudents.length} students on roll ·{" "}
+            <span style={{ color: FOREST }}>{presentSet.size} present</span>,{" "}
+            <span style={{ color: BRICK }}>{classStudents.length - presentSet.size} absent</span>
+          </div>
+          <div className="rounded-md overflow-hidden" style={{ border: `1px solid ${LINE}` }}>
+            {classStudents
+              .slice()
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((s, i) => (
+                <div
+                  key={s.id}
+                  className="flex items-center justify-between px-4 py-2 text-sm"
+                  style={{ background: i % 2 ? "#fff" : CARD, borderBottom: `1px solid ${LINE}` }}
+                >
+                  <span style={{ color: INK }}>{s.name}</span>
+                  <span style={{ color: presentSet.has(s.id) ? FOREST : BRICK }}>
+                    {presentSet.has(s.id) ? "Present" : "Absent"}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- ADMIN root ----------
+function Admin({ structure, saveStructure, students, saveStudents, notify }) {
+  const [tab, setTab] = useState("classes");
+  const tabs = [
+    { id: "classes", label: "Classes" },
+    { id: "students", label: "Students" },
+    { id: "reports", label: "Reports" },
+  ];
+  return (
+    <div>
+      <div className="flex gap-1 mb-8" style={{ borderBottom: `1px solid ${LINE}` }}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className="px-4 py-2 text-sm -mb-px"
+            style={{
+              color: tab === t.id ? INK : MUTED,
+              borderBottom: tab === t.id ? `2px solid ${FOREST}` : "2px solid transparent",
+              fontWeight: tab === t.id ? 600 : 400,
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {tab === "classes" && <AdminClasses structure={structure} saveStructure={saveStructure} />}
+      {tab === "students" && (
+        <AdminStudents structure={structure} students={students} saveStudents={saveStudents} notify={notify} />
+      )}
+      {tab === "reports" && <AdminReports structure={structure} students={students} />}
+    </div>
+  );
+}
+
+// ---------- ROOT APP ----------
+function App() {
+  const [structure, setStructure] = useState(defaultStructure());
+  const [students, setStudents] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [view, setView] = useState("home");
+  const [teacherStep, setTeacherStep] = useState("name");
+  const [teacherName, setTeacherName] = useState("");
+  const [recentTeachers, setRecentTeachers] = useState([]);
+  const [pickedGrade, setPickedGrade] = useState(null);
+  const [pickedClass, setPickedClass] = useState(null);
+  const [date, setDate] = useState(todayStr());
+  const [toast, setToast] = useState(null);
+
+  // Initial load
+  useEffect(() => {
+    (async () => {
+      const [s, stu, recent] = await Promise.all([
+        storageGet("structure"),
+        storageGet("students"),
+        storageGet("recent-teachers"),
+      ]);
+      if (s) setStructure(s);
+      else await storageSet("structure", defaultStructure());
+      if (stu) setStudents(stu);
+      if (recent) setRecentTeachers(recent);
+      setReady(true);
+    })();
+  }, []);
+
+  // Live sync: any device's changes to classes/students show up here automatically
+  useEffect(() => {
+    if (!db) return;
+    const unsubStructure = db.collection(COLLECTION).doc("structure").onSnapshot((snap) => {
+      if (snap.exists) setStructure(JSON.parse(snap.data().value));
+    });
+    const unsubStudents = db.collection(COLLECTION).doc("students").onSnapshot((snap) => {
+      if (snap.exists) setStudents(JSON.parse(snap.data().value));
+    });
+    return () => {
+      unsubStructure();
+      unsubStudents();
+    };
+  }, []);
+
+  const saveStructure = useCallback(async (next) => {
+    setStructure(next);
+    await storageSet("structure", next);
+    setToast("Saved.");
+    return true;
+  }, []);
+
+  const saveStudents = useCallback(async (next) => {
+    setStudents(next);
+    const ok = await storageSet("students", next);
+    return ok;
+  }, []);
+
+  const goHome = () => {
+    setView("home");
+    setTeacherStep("name");
+    setPickedGrade(null);
+    setPickedClass(null);
+  };
+
+  const onTeacherName = async (name) => {
+    setTeacherName(name);
+    setTeacherStep("class");
+    if (!recentTeachers.includes(name)) {
+      const next = [name, ...recentTeachers].slice(0, 6);
+      setRecentTeachers(next);
+      await storageSet("recent-teachers", next);
+    }
+  };
+
+  const onTeacherClassPick = (grade, klass) => {
+    setPickedGrade(grade);
+    setPickedClass(klass);
+    setTeacherStep("roster");
+  };
+
+  if (!CONFIG_READY) {
+    return <SetupNeeded />;
+  }
+
+  if (!ready) {
+    return (
+      <div className="min-h-full w-full flex items-center justify-center" style={{ background: PAPER }}>
+        <div className="text-sm" style={{ color: MUTED }}>
+          Loading register…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-full w-full" style={{ background: PAPER, color: INK, fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      <div className="max-w-4xl mx-auto px-6 py-10">
+        <Header
+          onHome={goHome}
+          subtitle={
+            view === "teacher" && teacherStep !== "name"
+              ? teacherName
+              : view === "admin"
+              ? "Admin"
+              : null
+          }
+        />
+
+        {view === "home" && <Home onPick={setView} />}
+
+        {view === "teacher" && teacherStep === "name" && (
+          <TeacherName recent={recentTeachers} onSubmit={onTeacherName} />
+        )}
+        {view === "teacher" && teacherStep === "class" && (
+          <TeacherClassPick structure={structure} onPick={onTeacherClassPick} />
+        )}
+        {view === "teacher" && teacherStep === "roster" && (
+          <TeacherRoster
+            grade={pickedGrade}
+            klass={pickedClass}
+            students={students}
+            teacherName={teacherName}
+            date={date}
+            setDate={setDate}
+            onBack={() => setTeacherStep("class")}
+            onSaved={() => setToast("Attendance saved.")}
+          />
+        )}
+
+        {view === "admin" && (
+          <Admin
+            structure={structure}
+            saveStructure={saveStructure}
+            students={students}
+            saveStudents={saveStudents}
+            notify={setToast}
+          />
+        )}
+      </div>
+      {toast && <Toast text={toast} onDone={() => setToast(null)} />}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
